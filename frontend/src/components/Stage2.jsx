@@ -22,10 +22,14 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings }) {
   }
 
   return (
-    <div className="stage stage2">
-      <h3 className="stage-title">Stage 2: Peer Rankings</h3>
+    <details className="stage stage2 collapsible">
+      <summary className="stage-summary">
+        <span className="stage-title">Stage 2: Peer Rankings</span>
+        <span className="stage-meta">({rankings.length} evaluations)</span>
+      </summary>
 
-      <h4>Raw Evaluations</h4>
+      <div className="stage-content">
+        <h4>Raw Evaluations</h4>
       <p className="stage-description">
         Each model evaluated all responses (anonymized as Response A, B, C, etc.) and provided rankings.
         Below, model names are shown in <strong>bold</strong> for readability, but the original evaluation used anonymous labels.
@@ -94,6 +98,7 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings }) {
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </details>
   );
 }

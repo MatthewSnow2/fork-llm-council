@@ -2,6 +2,10 @@
   background: #fafafa;
 }
 
+.stage2.collapsible .stage-content {
+  padding-top: 16px;
+}
+
 .stage2 h4 {
   margin: 20px 0 8px 0;
   color: #333;

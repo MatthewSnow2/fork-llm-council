@@ -1,6 +1,35 @@
-.stage3 {
+.stage3.primary-result {
   background: #f0fff0;
-  border-color: #c8e6c8;
+  border: 2px solid #4caf50;
+  padding: 20px;
+}
+
+.stage3 .stage-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #c8e6c8;
+}
+
+.stage3 .stage-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: #4caf50;
+  color: white;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.stage3 .stage-title {
+  color: #2d8a2d;
+  font-size: 18px;
+  font-weight: 700;
 }
 
 .final-response {

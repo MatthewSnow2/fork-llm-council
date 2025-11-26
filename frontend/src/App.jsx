@@ -4,6 +4,28 @@ import ChatInterface from './components/ChatInterface';
 import { api } from './api';
 import './App.css';
 
+// localStorage key for storing owned conversation IDs
+const OWNED_CONVERSATIONS_KEY = 'llm-council-owned-conversations';
+
+// Get array of conversation IDs owned by this browser session
+function getOwnedConversationIds() {
+  try {
+    const stored = localStorage.getItem(OWNED_CONVERSATIONS_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Add a conversation ID to the owned list
+function addOwnedConversationId(id) {
+  const owned = getOwnedConversationIds();
+  if (!owned.includes(id)) {
+    owned.push(id);
+    localStorage.setItem(OWNED_CONVERSATIONS_KEY, JSON.stringify(owned));
+  }
+}
+
 function App() {
   const [conversations, setConversations] = useState([]);
   const [currentConversationId, setCurrentConversationId] = useState(null);
@@ -24,8 +46,11 @@ function App() {
 
   const loadConversations = async () => {
     try {
-      const convs = await api.listConversations();
-      setConversations(convs);
+      const allConvs = await api.listConversations();
+      // Filter to only show conversations owned by this browser session
+      const ownedIds = getOwnedConversationIds();
+      const ownedConvs = allConvs.filter(conv => ownedIds.includes(conv.id));
+      setConversations(ownedConvs);
     } catch (error) {
       console.error('Failed to load conversations:', error);
     }
@@ -43,6 +68,8 @@ function App() {
   const handleNewConversation = async () => {
     try {
       const newConv = await api.createConversation();
+      // Store the new conversation ID in localStorage for this browser session
+      addOwnedConversationId(newConv.id);
       setConversations([
         { id: newConv.id, created_at: newConv.created_at, message_count: 0 },
         ...conversations,
