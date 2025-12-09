@@ -2,10 +2,20 @@
  * API client for the LLM Council backend.
  */
 
-// Use environment variable for API base URL, fallback to localhost for development
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8001';
+const API_BASE = 'http://localhost:8001';
 
 export const api = {
+  /**
+   * List all available council modes.
+   */
+  async listModes() {
+    const response = await fetch(`${API_BASE}/api/modes`);
+    if (!response.ok) {
+      throw new Error('Failed to list modes');
+    }
+    return response.json();
+  },
+
   /**
    * List all conversations.
    */
@@ -19,14 +29,15 @@ export const api = {
 
   /**
    * Create a new conversation.
+   * @param {string} mode - The council mode (standard, research, creative)
    */
-  async createConversation() {
+  async createConversation(mode = 'standard') {
     const response = await fetch(`${API_BASE}/api/conversations`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ mode }),
     });
     if (!response.ok) {
       throw new Error('Failed to create conversation');

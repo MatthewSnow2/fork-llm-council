@@ -1,24 +1,37 @@
 """3-stage LLM Council orchestration."""
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from .openrouter import query_models_parallel, query_model
 from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
+from .deep_research import run_deep_research, format_research_context, DEEP_RESEARCH_TIMEOUT
 
 
-async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
+async def stage1_collect_responses(
+    user_query: str,
+    temperature: Optional[float] = None,
+    research_context: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """
     Stage 1: Collect individual responses from all council models.
 
     Args:
         user_query: The user's question
+        temperature: Optional temperature for response generation
+        research_context: Optional pre-research context to include
 
     Returns:
         List of dicts with 'model' and 'response' keys
     """
-    messages = [{"role": "user", "content": user_query}]
+    # Build the query with optional research context
+    if research_context:
+        full_query = f"{research_context}\n\n{user_query}"
+    else:
+        full_query = user_query
+
+    messages = [{"role": "user", "content": full_query}]
 
     # Query all models in parallel
-    responses = await query_models_parallel(COUNCIL_MODELS, messages)
+    responses = await query_models_parallel(COUNCIL_MODELS, messages, temperature=temperature)
 
     # Format results
     stage1_results = []
@@ -34,7 +47,8 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
 
 async def stage2_collect_rankings(
     user_query: str,
-    stage1_results: List[Dict[str, Any]]
+    stage1_results: List[Dict[str, Any]],
+    temperature: Optional[float] = None
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """
     Stage 2: Each model ranks the anonymized responses.
@@ -95,7 +109,7 @@ Now provide your evaluation and ranking:"""
     messages = [{"role": "user", "content": ranking_prompt}]
 
     # Get rankings from all council models in parallel
-    responses = await query_models_parallel(COUNCIL_MODELS, messages)
+    responses = await query_models_parallel(COUNCIL_MODELS, messages, temperature=temperature)
 
     # Format results
     stage2_results = []
@@ -115,7 +129,9 @@ Now provide your evaluation and ranking:"""
 async def stage3_synthesize_final(
     user_query: str,
     stage1_results: List[Dict[str, Any]],
-    stage2_results: List[Dict[str, Any]]
+    stage2_results: List[Dict[str, Any]],
+    chairman_model: Optional[str] = None,
+    timeout: float = 120.0
 ) -> Dict[str, Any]:
     """
     Stage 3: Chairman synthesizes final response.
@@ -124,10 +140,13 @@ async def stage3_synthesize_final(
         user_query: The original user query
         stage1_results: Individual model responses from Stage 1
         stage2_results: Rankings from Stage 2
+        chairman_model: Optional override for chairman model (for deep research chairman)
+        timeout: Request timeout (longer for deep research models)
 
     Returns:
         Dict with 'model' and 'response' keys
     """
+    model = chairman_model or CHAIRMAN_MODEL
     # Build comprehensive context for chairman
     stage1_text = "\n\n".join([
         f"Model: {result['model']}\nResponse: {result['response']}"
@@ -159,17 +178,17 @@ Provide a clear, well-reasoned final answer that represents the council's collec
     messages = [{"role": "user", "content": chairman_prompt}]
 
     # Query the chairman model
-    response = await query_model(CHAIRMAN_MODEL, messages)
+    response = await query_model(model, messages, timeout=timeout)
 
     if response is None:
         # Fallback if chairman fails
         return {
-            "model": CHAIRMAN_MODEL,
+            "model": model,
             "response": "Error: Unable to generate final synthesis."
         }
 
     return {
-        "model": CHAIRMAN_MODEL,
+        "model": model,
         "response": response.get('content', '')
     }
 
@@ -293,18 +312,32 @@ Title:"""
     return title
 
 
-async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
+async def run_full_council(
+    user_query: str,
+    temperature: Optional[float] = None,
+    research_context: Optional[str] = None,
+    chairman_model: Optional[str] = None,
+    chairman_timeout: float = 120.0
+) -> Tuple[List, List, Dict, Dict]:
     """
     Run the complete 3-stage council process.
 
     Args:
         user_query: The user's question
+        temperature: Optional temperature for model responses
+        research_context: Optional pre-research context to include
+        chairman_model: Optional override for chairman model
+        chairman_timeout: Timeout for chairman (longer for deep research models)
 
     Returns:
         Tuple of (stage1_results, stage2_results, stage3_result, metadata)
     """
     # Stage 1: Collect individual responses
-    stage1_results = await stage1_collect_responses(user_query)
+    stage1_results = await stage1_collect_responses(
+        user_query,
+        temperature=temperature,
+        research_context=research_context
+    )
 
     # If no models responded successfully, return error
     if not stage1_results:
@@ -314,7 +347,11 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
         }, {}
 
     # Stage 2: Collect rankings
-    stage2_results, label_to_model = await stage2_collect_rankings(user_query, stage1_results)
+    stage2_results, label_to_model = await stage2_collect_rankings(
+        user_query,
+        stage1_results,
+        temperature=temperature
+    )
 
     # Calculate aggregate rankings
     aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
@@ -323,7 +360,9 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
     stage3_result = await stage3_synthesize_final(
         user_query,
         stage1_results,
-        stage2_results
+        stage2_results,
+        chairman_model=chairman_model,
+        timeout=chairman_timeout
     )
 
     # Prepare metadata
@@ -333,3 +372,81 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
     }
 
     return stage1_results, stage2_results, stage3_result, metadata
+
+
+# ============================================================================
+# Mode-specific council runners
+# ============================================================================
+
+async def run_standard_mode(user_query: str) -> Tuple[None, List, List, Dict, Dict]:
+    """
+    Run standard council mode (existing behavior).
+
+    Returns:
+        Tuple of (research_result, stage1, stage2, stage3, metadata)
+    """
+    stage1, stage2, stage3, metadata = await run_full_council(user_query)
+    return None, stage1, stage2, stage3, metadata
+
+
+async def run_research_mode(
+    user_query: str,
+    deep_research_model: str = "openai/o3-deep-research"
+) -> Tuple[Optional[Dict], List, List, Dict, Dict]:
+    """
+    Run research mode: Deep research first, then council with research context.
+
+    Flow: Deep Research → Stage 1 → Stage 2 → Stage 3
+
+    Args:
+        user_query: The user's question
+        deep_research_model: Model to use for deep research
+
+    Returns:
+        Tuple of (research_result, stage1, stage2, stage3, metadata)
+    """
+    # Run deep research first
+    research_result = await run_deep_research(user_query, model=deep_research_model)
+
+    # Format research as context for the council
+    research_context = None
+    if research_result:
+        research_context = format_research_context(research_result)
+
+    # Run council with research context
+    stage1, stage2, stage3, metadata = await run_full_council(
+        user_query,
+        research_context=research_context
+    )
+
+    return research_result, stage1, stage2, stage3, metadata
+
+
+async def run_creative_mode(
+    user_query: str,
+    creative_temperature: float = 1.0,
+    chairman_model: str = "openai/o3-deep-research"
+) -> Tuple[None, List, List, Dict, Dict]:
+    """
+    Run creative mode: High-temperature council with deep research chairman.
+
+    Flow: Stage 1 (high temp) → Stage 2 → Deep Research Chairman
+
+    Args:
+        user_query: The user's question
+        creative_temperature: Temperature for creative brainstorming (higher = more creative)
+        chairman_model: Deep research model for final synthesis
+
+    Returns:
+        Tuple of (research_result, stage1, stage2, stage3, metadata)
+        Note: research_result is None for creative mode (research happens in chairman)
+    """
+    # Run council with high temperature and deep research chairman
+    stage1, stage2, stage3, metadata = await run_full_council(
+        user_query,
+        temperature=creative_temperature,
+        chairman_model=chairman_model,
+        chairman_timeout=DEEP_RESEARCH_TIMEOUT
+    )
+
+    return None, stage1, stage2, stage3, metadata

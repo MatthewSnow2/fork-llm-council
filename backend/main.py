@@ -11,15 +11,18 @@ import json
 import asyncio
 
 from . import storage
-from .council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings
+from .council import (
+    run_full_council, generate_conversation_title,
+    stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final,
+    calculate_aggregate_rankings, run_standard_mode, run_research_mode, run_creative_mode
+)
+from .deep_research import run_deep_research, format_research_context, DEEP_RESEARCH_TIMEOUT
+from .modes import list_modes, get_mode, DEFAULT_MODE
 
 app = FastAPI(title="LLM Council API")
 
-# Get allowed origins from environment, with localhost fallbacks for development
-CORS_ORIGINS = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:5173,http://localhost:3000"
-).split(",")
+# Allowed origins for local development
+CORS_ORIGINS = ["http://localhost:5173", "http://localhost:3000"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +35,7 @@ app.add_middleware(
 
 class CreateConversationRequest(BaseModel):
     """Request to create a new conversation."""
-    pass
+    mode: str = DEFAULT_MODE
 
 
 class SendMessageRequest(BaseModel):
@@ -46,6 +49,7 @@ class ConversationMetadata(BaseModel):
     created_at: str
     title: str
     message_count: int
+    mode: str = DEFAULT_MODE
 
 
 class Conversation(BaseModel):
@@ -54,12 +58,19 @@ class Conversation(BaseModel):
     created_at: str
     title: str
     messages: List[Dict[str, Any]]
+    mode: str = DEFAULT_MODE
 
 
 @app.get("/")
 async def root():
     """Health check endpoint."""
     return {"status": "ok", "service": "LLM Council API"}
+
+
+@app.get("/api/modes")
+async def get_modes():
+    """List all available council modes."""
+    return list_modes()
 
 
 @app.get("/api/conversations", response_model=List[ConversationMetadata])
@@ -72,7 +83,9 @@ async def list_conversations():
 async def create_conversation(request: CreateConversationRequest):
     """Create a new conversation."""
     conversation_id = str(uuid.uuid4())
-    conversation = storage.create_conversation(conversation_id)
+    # Validate mode exists
+    mode = get_mode(request.mode)
+    conversation = storage.create_conversation(conversation_id, mode=request.mode)
     return conversation
 
 
@@ -132,13 +145,22 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
 @app.post("/api/conversations/{conversation_id}/message/stream")
 async def send_message_stream(conversation_id: str, request: SendMessageRequest):
     """
-    Send a message and stream the 3-stage council process.
+    Send a message and stream the council process based on conversation mode.
     Returns Server-Sent Events as each stage completes.
+
+    Modes:
+    - standard: Stage 1 → Stage 2 → Stage 3
+    - research: Research → Stage 1 → Stage 2 → Stage 3
+    - creative: Stage 1 (high temp) → Stage 2 → Stage 3 (deep research chairman)
     """
     # Check if conversation exists
     conversation = storage.get_conversation(conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Get mode configuration
+    mode_id = conversation.get("mode", DEFAULT_MODE)
+    mode_config = get_mode(mode_id)
 
     # Check if this is the first message
     is_first_message = len(conversation["messages"]) == 0
@@ -153,20 +175,56 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             if is_first_message:
                 title_task = asyncio.create_task(generate_conversation_title(request.content))
 
+            # Send mode info
+            yield f"data: {json.dumps({'type': 'mode_info', 'data': {'mode': mode_id, 'config': mode_config}})}\n\n"
+
+            research_result = None
+            research_context = None
+
+            # Research mode: Run deep research first
+            if mode_config["flow"] == "research_first":
+                yield f"data: {json.dumps({'type': 'research_start'})}\n\n"
+                research_result = await run_deep_research(
+                    request.content,
+                    model=mode_config.get("deep_research_model", "openai/o3-deep-research")
+                )
+                yield f"data: {json.dumps({'type': 'research_complete', 'data': research_result})}\n\n"
+
+                if research_result:
+                    research_context = format_research_context(research_result)
+
             # Stage 1: Collect responses
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-            stage1_results = await stage1_collect_responses(request.content)
+            stage1_results = await stage1_collect_responses(
+                request.content,
+                temperature=mode_config.get("temperature"),
+                research_context=research_context
+            )
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
             # Stage 2: Collect rankings
             yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-            stage2_results, label_to_model = await stage2_collect_rankings(request.content, stage1_results)
+            stage2_results, label_to_model = await stage2_collect_rankings(
+                request.content,
+                stage1_results,
+                temperature=mode_config.get("temperature")
+            )
             aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
             yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings}})}\n\n"
 
             # Stage 3: Synthesize final answer
+            # For creative mode, use deep research model as chairman
+            chairman_model = mode_config.get("chairman_model")
+            chairman_timeout = DEEP_RESEARCH_TIMEOUT if "deep-research" in (chairman_model or "") else 120.0
+
             yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            stage3_result = await stage3_synthesize_final(
+                request.content,
+                stage1_results,
+                stage2_results,
+                chairman_model=chairman_model,
+                timeout=chairman_timeout
+            )
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
 
             # Wait for title generation if it was started
@@ -175,12 +233,13 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 storage.update_conversation_title(conversation_id, title)
                 yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
 
-            # Save complete assistant message
+            # Save complete assistant message (including research if present)
             storage.add_assistant_message(
                 conversation_id,
                 stage1_results,
                 stage2_results,
-                stage3_result
+                stage3_result,
+                research=research_result
             )
 
             # Send completion event
@@ -202,5 +261,4 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8001))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

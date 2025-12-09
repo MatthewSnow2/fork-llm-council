@@ -4,8 +4,9 @@ import ChatInterface from './components/ChatInterface';
 import { api } from './api';
 import './App.css';
 
-// localStorage key for storing owned conversation IDs
+// localStorage keys
 const OWNED_CONVERSATIONS_KEY = 'llm-council-owned-conversations';
+const SELECTED_MODE_KEY = 'llm-council-selected-mode';
 
 // Get array of conversation IDs owned by this browser session
 function getOwnedConversationIds() {
@@ -26,23 +27,31 @@ function addOwnedConversationId(id) {
   }
 }
 
+// Get saved mode from localStorage
+function getSavedMode() {
+  try {
+    return localStorage.getItem(SELECTED_MODE_KEY) || 'standard';
+  } catch {
+    return 'standard';
+  }
+}
+
+// Save mode to localStorage
+function saveMode(mode) {
+  try {
+    localStorage.setItem(SELECTED_MODE_KEY, mode);
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
 function App() {
   const [conversations, setConversations] = useState([]);
   const [currentConversationId, setCurrentConversationId] = useState(null);
   const [currentConversation, setCurrentConversation] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
-
-  // Load conversations on mount
-  useEffect(() => {
-    loadConversations();
-  }, []);
-
-  // Load conversation details when selected
-  useEffect(() => {
-    if (currentConversationId) {
-      loadConversation(currentConversationId);
-    }
-  }, [currentConversationId]);
+  const [modes, setModes] = useState([]);
+  const [selectedMode, setSelectedMode] = useState(getSavedMode());
 
   const loadConversations = async () => {
     try {
@@ -56,6 +65,21 @@ function App() {
     }
   };
 
+  const loadModes = async () => {
+    try {
+      const modesData = await api.listModes();
+      setModes(modesData);
+    } catch (error) {
+      console.error('Failed to load modes:', error);
+      // Fallback to default modes
+      setModes([
+        { id: 'standard', name: 'Standard', description: 'Balanced deliberation', icon: '⚖️' },
+        { id: 'research', name: 'Research', description: 'Deep research first', icon: '🔬' },
+        { id: 'creative', name: 'Creative', description: 'High-creativity brainstorming', icon: '🎨' },
+      ]);
+    }
+  };
+
   const loadConversation = async (id) => {
     try {
       const conv = await api.getConversation(id);
@@ -65,13 +89,31 @@ function App() {
     }
   };
 
+  const handleModeChange = (mode) => {
+    setSelectedMode(mode);
+    saveMode(mode);
+  };
+
+  // Load conversations and modes on mount
+  useEffect(() => {
+    loadConversations();
+    loadModes();
+  }, []);
+
+  // Load conversation details when selected
+  useEffect(() => {
+    if (currentConversationId) {
+      loadConversation(currentConversationId);
+    }
+  }, [currentConversationId]);
+
   const handleNewConversation = async () => {
     try {
-      const newConv = await api.createConversation();
+      const newConv = await api.createConversation(selectedMode);
       // Store the new conversation ID in localStorage for this browser session
       addOwnedConversationId(newConv.id);
       setConversations([
-        { id: newConv.id, created_at: newConv.created_at, message_count: 0 },
+        { id: newConv.id, created_at: newConv.created_at, message_count: 0, mode: selectedMode },
         ...conversations,
       ]);
       setCurrentConversationId(newConv.id);
@@ -99,11 +141,13 @@ function App() {
       // Create a partial assistant message that will be updated progressively
       const assistantMessage = {
         role: 'assistant',
+        research: null,
         stage1: null,
         stage2: null,
         stage3: null,
         metadata: null,
         loading: {
+          research: false,
           stage1: false,
           stage2: false,
           stage3: false,
@@ -119,6 +163,30 @@ function App() {
       // Send message with streaming
       await api.sendMessageStream(currentConversationId, content, (eventType, event) => {
         switch (eventType) {
+          case 'mode_info':
+            // Mode info received, could display in UI if needed
+            console.log('Mode:', event.data);
+            break;
+
+          case 'research_start':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = messages[messages.length - 1];
+              lastMsg.loading.research = true;
+              return { ...prev, messages };
+            });
+            break;
+
+          case 'research_complete':
+            setCurrentConversation((prev) => {
+              const messages = [...prev.messages];
+              const lastMsg = messages[messages.length - 1];
+              lastMsg.research = event.data;
+              lastMsg.loading.research = false;
+              return { ...prev, messages };
+            });
+            break;
+
           case 'stage1_start':
             setCurrentConversation((prev) => {
               const messages = [...prev.messages];
@@ -215,6 +283,9 @@ function App() {
         currentConversationId={currentConversationId}
         onSelectConversation={handleSelectConversation}
         onNewConversation={handleNewConversation}
+        modes={modes}
+        selectedMode={selectedMode}
+        onModeChange={handleModeChange}
       />
       <ChatInterface
         conversation={currentConversation}

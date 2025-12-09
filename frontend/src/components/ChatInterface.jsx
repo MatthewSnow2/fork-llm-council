@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
+import ResearchStage from './ResearchStage';
 import Stage1 from './Stage1';
 import Stage2 from './Stage2';
 import Stage3 from './Stage3';
@@ -71,6 +72,15 @@ export default function ChatInterface({
               ) : (
                 <div className="assistant-message">
                   <div className="message-label">LLM Council</div>
+
+                  {/* Research Stage (for research mode) */}
+                  {msg.loading?.research && (
+                    <div className="stage-loading research-loading">
+                      <div className="spinner"></div>
+                      <span>Running Deep Research...</span>
+                    </div>
+                  )}
+                  {msg.research && <ResearchStage research={msg.research} />}
 
                   {/* Stage 1 */}
                   {msg.loading?.stage1 && (
